@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 ## Chargement et aperçu des données
 
 # Charger les données
-file_path = "C:/Users/salih/OneDrive/Documents/DATA SCIENCE/bike-sharing-demand/train.csv"
+file_path = "./train.csv"
 data = pd.read_csv(file_path)
 
 # Afficher les premières lignes
