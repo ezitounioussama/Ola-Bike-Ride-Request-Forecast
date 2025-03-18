@@ -4,14 +4,14 @@ import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor, IsolationForest
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
 
 def load_and_explore_data(file_path: str) -> pd.DataFrame:
     """
-    Load data from a CSV file and display initial exploration info.
+    Load data from CSV and display initial exploration information.
     """
     data = pd.read_csv(file_path)
     print("Initial Data Exploration:")
@@ -50,16 +50,16 @@ def detect_and_remove_outliers(data: pd.DataFrame, show_plots: bool = True) -> p
         plt.title("Visualisation des outliers avec Isolation Forest")
         plt.show()
     
-    # Keep only the rows where outlier == 1
+    # Keep only rows classified as inliers (i.e. outlier == 1)
     return data[data['outlier'] == 1]
 
 
 def perform_clustering(data: pd.DataFrame, n_clusters: int = 3) -> pd.DataFrame:
     """
-    Perform clustering on selected weather-related features and add the cluster labels to the data.
+    Perform clustering on selected weather-related features and add cluster labels.
     """
     cluster_features = ["temp", "atemp", "humidity", "windspeed"]
-    # Keep only the features that exist in the dataset
+    # Keep only features that exist in the dataset
     cluster_features = [cf for cf in cluster_features if cf in data.columns]
     
     if cluster_features:
@@ -77,8 +77,8 @@ def perform_clustering(data: pd.DataFrame, n_clusters: int = 3) -> pd.DataFrame:
 
 def prepare_features(data: pd.DataFrame, show_plots: bool = True):
     """
-    Convert categorical features to dummy variables and split the data into features and target.
-    Optionally, display the correlation matrix.
+    Convert categorical features to dummy variables, optionally display the correlation matrix,
+    and split data into features (X) and target (y).
     """
     if show_plots:
         corr_matrix = data.corr()
@@ -87,7 +87,7 @@ def prepare_features(data: pd.DataFrame, show_plots: bool = True):
         plt.title("Matrice de Corrélation")
         plt.show()
     
-    # Convert categorical variables (e.g., season, weather, cluster) into dummy variables
+    # Convert categorical variables to dummies
     data = pd.get_dummies(data, columns=["season", "weather"], drop_first=True)
     data = pd.get_dummies(data, columns=["cluster"], prefix="clust", drop_first=True)
     
@@ -98,7 +98,7 @@ def prepare_features(data: pd.DataFrame, show_plots: bool = True):
 
 def split_and_scale(X, y, test_size: float = 0.2, random_state: int = 42):
     """
-    Split data into training and testing sets and apply standard scaling.
+    Split data into training and test sets and apply standard scaling.
     """
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
     scaler = StandardScaler()
@@ -109,7 +109,7 @@ def split_and_scale(X, y, test_size: float = 0.2, random_state: int = 42):
 
 def train_model(X_train, y_train) -> RandomForestRegressor:
     """
-    Train a Random Forest Regressor with the predetermined best parameters.
+    Train a Random Forest Regressor with the best parameters.
     Best Parameters: {'max_depth': 20, 'min_samples_split': 2, 'n_estimators': 200}
     """
     model = RandomForestRegressor(max_depth=20, min_samples_split=2, n_estimators=200, random_state=42)
@@ -121,14 +121,17 @@ def train_model(X_train, y_train) -> RandomForestRegressor:
 
 def evaluate_model(model, X_test, y_test, show_plots: bool = True):
     """
-    Evaluate the model using MAE and RMSE, and optionally plot predictions vs. actual values.
+    Evaluate the model using MAE, RMSE, and R² score, and optionally plot predictions versus actual values.
     """
     y_pred = model.predict(X_test)
     mae = mean_absolute_error(y_test, y_pred)
     mse = mean_squared_error(y_test, y_pred)
     rmse = mse ** 0.5
+    r2 = r2_score(y_test, y_pred)
+    
     print(f"Mean Absolute Error: {mae}")
     print(f"Root Mean Squared Error: {rmse}")
+    print(f"R^2 Score: {r2}")
     
     if show_plots:
         plt.figure(figsize=(10, 6))
@@ -139,22 +142,24 @@ def evaluate_model(model, X_test, y_test, show_plots: bool = True):
         plt.title('Prédictions vs Valeurs Réelles (Random Forest)')
         plt.show()
     
-    return mae, rmse
+    return mae, rmse, r2
 
 
 def process_and_predict(file_path: str, n_clusters: int = 3, show_plots: bool = True):
     """
-    Process the dataset and predict ride-request counts using a Random Forest Regressor.
+    Process the dataset, forecast bike ride demand with a Random Forest Regressor,
+    and evaluate model performance.
     
     Args:
         file_path (str): Path to the CSV file.
-        n_clusters (int): Number of clusters to form during clustering.
+        n_clusters (int): Number of clusters for the clustering step.
         show_plots (bool): Whether to display plots.
     
     Returns:
         model: The trained Random Forest model.
         mae (float): Mean Absolute Error on the test set.
         rmse (float): Root Mean Squared Error on the test set.
+        r2 (float): R² score on the test set.
     """
     data = load_and_explore_data(file_path)
     data = preprocess_data(data)
@@ -170,11 +175,11 @@ def process_and_predict(file_path: str, n_clusters: int = 3, show_plots: bool = 
     X_train, X_test, y_train, y_test = split_and_scale(X, y)
     
     model = train_model(X_train, y_train)
-    mae, rmse = evaluate_model(model, X_test, y_test, show_plots=show_plots)
+    mae, rmse, r2 = evaluate_model(model, X_test, y_test, show_plots=show_plots)
     
-    return model, mae, rmse
+    return model, mae, rmse, r2
 
 
 if __name__ == "__main__":
-    file_path = "/content/train.csv"  # Update this path as needed
-    model, mae, rmse = process_and_predict(file_path, n_clusters=3, show_plots=True)
+    file_path = "/content/train.csv" 
+    model, mae, rmse, r2 = process_and_predict(file_path, n_clusters=3, show_plots=True)
