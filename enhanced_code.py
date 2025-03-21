@@ -1,185 +1,296 @@
+import warnings
+warnings.filterwarnings("ignore")  # Suppress all warnings
+
+import logging
+logging.getLogger("lightgbm").setLevel(logging.ERROR)
+
 import pandas as pd
+pd.set_option('display.max_colwidth', None)  # Show full content in DataFrame columns
+
+import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestRegressor, IsolationForest
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
+import xgboost as xgb
+import lightgbm as lgb
+import statsmodels.api as sm
 
-def load_and_explore_data(file_path: str) -> pd.DataFrame:
-    """
-    Load data from CSV and display initial exploration information.
-    """
-    data = pd.read_csv(file_path)
-    print("Initial Data Exploration:")
-    print(data.head())
-    print(data.info())
-    print("Missing values per column:")
-    print(data.isnull().sum())
-    print("\n")
-    return data
+###############################################################################
+# 1) HELPER FUNCTIONS FOR DATA PREPARATION
+###############################################################################
 
-
-def preprocess_data(data: pd.DataFrame) -> pd.DataFrame:
+def prepare_train_data(df, n_clusters=3, show_plots=False):
     """
-    Handle missing values and extract datetime-related features.
+    Preprocess training data:
+      - Drop target-leaking columns if present (casual, registered).
+      - Convert datetime, create time-based features.
+      - Detect outliers (IsolationForest) based on 'count'.
+      - Drop outliers.
+      - Perform KMeans clustering on selected weather features.
+      - One-hot encode season/weather/cluster.
+      - Return preprocessed DataFrame ready for splitting into X, y.
+      - Also return the fitted StandardScaler, fitted KMeans, and the final columns used for X.
     """
-    data.fillna(method='ffill', inplace=True)
-    data["datetime"] = pd.to_datetime(data["datetime"])
-    data["year"] = data["datetime"].dt.year
-    data["month"] = data["datetime"].dt.month
-    data["day"] = data["datetime"].dt.day
-    data["hour"] = data["datetime"].dt.hour
-    data["weekday"] = data["datetime"].dt.weekday
-    data["is_weekend"] = data["weekday"].apply(lambda x: 1 if x >= 5 else 0)
-    return data
-
-
-def detect_and_remove_outliers(data: pd.DataFrame, show_plots: bool = True) -> pd.DataFrame:
-    """
-    Detect and remove outliers using Isolation Forest on the 'count' column.
-    """
-    isolation_forest = IsolationForest(contamination=0.05, random_state=42)
-    data['outlier'] = isolation_forest.fit_predict(data[['count']])
+    # 1) Drop leaking columns if they exist
+    for col in ["casual", "registered"]:
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True)
     
+    # 2) Basic cleaning
+    df.fillna(method='ffill', inplace=True)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["year"] = df["datetime"].dt.year
+    df["month"] = df["datetime"].dt.month
+    df["day"] = df["datetime"].dt.day
+    df["hour"] = df["datetime"].dt.hour
+    df["weekday"] = df["datetime"].dt.weekday
+    df["is_weekend"] = df["weekday"].apply(lambda x: 1 if x >= 5 else 0)
+    
+    # Optional: show distribution
     if show_plots:
-        sns.boxplot(data=data, x='count', y='outlier')
-        plt.title("Visualisation des outliers avec Isolation Forest")
+        sns.histplot(df["count"], bins=30, kde=True)
+        plt.title("Distribution of 'count'")
         plt.show()
     
-    # Keep only rows classified as inliers (i.e. outlier == 1)
-    return data[data['outlier'] == 1]
-
-
-def perform_clustering(data: pd.DataFrame, n_clusters: int = 3) -> pd.DataFrame:
-    """
-    Perform clustering on selected weather-related features and add cluster labels.
-    """
-    cluster_features = ["temp", "atemp", "humidity", "windspeed"]
-    # Keep only features that exist in the dataset
-    cluster_features = [cf for cf in cluster_features if cf in data.columns]
+    # 3) Outlier detection
+    if "count" in df.columns:
+        iso = IsolationForest(contamination=0.05, random_state=42)
+        df["outlier"] = iso.fit_predict(df[["count"]])
+        df = df[df["outlier"] == 1]
+        df.drop(columns=["outlier"], inplace=True)
     
-    if cluster_features:
-        X_cluster = data[cluster_features].copy()
+    # 4) Clustering
+    cluster_features = ["temp", "atemp", "humidity", "windspeed"]
+    cluster_features = [c for c in cluster_features if c in df.columns]
+    if len(cluster_features) > 0:
+        # Fit KMeans on these features
+        X_cluster = df[cluster_features].copy()
         X_cluster.fillna(method='ffill', inplace=True)
         scaler_cluster = StandardScaler()
         X_cluster_scaled = scaler_cluster.fit_transform(X_cluster)
         
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-        data['cluster'] = kmeans.fit_predict(X_cluster_scaled)
+        df["cluster"] = kmeans.fit_predict(X_cluster_scaled)
     else:
-        data['cluster'] = 0
-    return data
-
-
-def prepare_features(data: pd.DataFrame, show_plots: bool = True):
-    """
-    Convert categorical features to dummy variables, optionally display the correlation matrix,
-    and split data into features (X) and target (y).
-    """
-    if show_plots:
-        corr_matrix = data.corr()
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
-        plt.title("Matrice de Corrélation")
-        plt.show()
+        kmeans = None
+        df["cluster"] = 0
     
-    # Convert categorical variables to dummies
-    data = pd.get_dummies(data, columns=["season", "weather"], drop_first=True)
-    data = pd.get_dummies(data, columns=["cluster"], prefix="clust", drop_first=True)
+    # 5) One-hot encoding
+    for col_to_dummy in ["season", "weather", "cluster"]:
+        if col_to_dummy in df.columns:
+            df = pd.get_dummies(df, columns=[col_to_dummy], prefix=col_to_dummy, drop_first=True)
     
-    X = data.drop(columns=["datetime", "count", "outlier"])
-    y = data["count"]
-    return X, y
-
-
-def split_and_scale(X, y, test_size: float = 0.2, random_state: int = 42):
-    """
-    Split data into training and test sets and apply standard scaling.
-    """
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
+    # 6) Final feature selection
+    if "count" not in df.columns:
+        raise ValueError("No 'count' column found in the training data!")
+    y = df["count"]
+    
+    # Drop columns not used as features
+    # We keep everything except 'datetime' and 'count'
+    drop_cols = ["datetime", "count"]
+    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    
+    # 7) Scale the final X
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    X_scaled = scaler.fit_transform(X)
+    
+    # Return the processed data plus fitted objects needed for test set
+    return X_scaled, y, scaler, kmeans, X.columns.tolist()
+
+
+def prepare_test_data(df, train_columns, scaler, kmeans=None):
+    """
+    Preprocess test data similarly to train:
+      - Convert datetime, create time-based features.
+      - NO outlier removal (no 'count').
+      - Use the same KMeans model from train to predict cluster labels.
+      - One-hot encode season/weather/cluster, then align columns with train.
+      - Scale using the same scaler from train.
+    """
+    # 1) Basic cleaning
+    df.fillna(method='ffill', inplace=True)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["year"] = df["datetime"].dt.year
+    df["month"] = df["datetime"].dt.month
+    df["day"] = df["datetime"].dt.day
+    df["hour"] = df["datetime"].dt.hour
+    df["weekday"] = df["datetime"].dt.weekday
+    df["is_weekend"] = df["weekday"].apply(lambda x: 1 if x >= 5 else 0)
+    
+    # 2) Cluster prediction if possible
+    cluster_features = ["temp", "atemp", "humidity", "windspeed"]
+    cluster_features = [c for c in cluster_features if c in df.columns]
+    if kmeans is not None and len(cluster_features) > 0:
+        # Use the same cluster approach from train
+        X_cluster = df[cluster_features].copy()
+        X_cluster.fillna(method='ffill', inplace=True)
+        # We assume KMeans was fitted on scaled data, so we must scale here the same way:
+        local_scaler = StandardScaler()
+        X_cluster_scaled = local_scaler.fit_transform(X_cluster)
+        df["cluster"] = kmeans.predict(X_cluster_scaled)
+    else:
+        df["cluster"] = 0
+    
+    # 3) One-hot encoding
+    for col_to_dummy in ["season", "weather", "cluster"]:
+        if col_to_dummy in df.columns:
+            df = pd.get_dummies(df, columns=[col_to_dummy], prefix=col_to_dummy, drop_first=True)
+    
+    # 4) Align columns with train
+    # We do NOT have 'count' in test
+    # Also 'datetime' is needed for submission, so we won't drop it from the DataFrame itself.
+    test_cols = df.columns.tolist()
+    # We only want the columns that were used for training
+    # but some might not exist in test, so we align them:
+    for col in train_columns:
+        if col not in df.columns:
+            df[col] = 0  # add missing column
+    # Also remove any extra columns that train didn't have (like 'count' if it existed)
+    extra_cols = set(df.columns) - set(train_columns) - {"datetime"}
+    if extra_cols:
+        df.drop(columns=extra_cols, inplace=True)
+    
+    # Reorder columns to match the exact order of train_columns
+    df = df.reindex(columns=["datetime"] + train_columns)  # keep datetime in front
+    
+    # 5) Scale using the training scaler
+    X_test = df[train_columns].values
     X_test_scaled = scaler.transform(X_test)
-    return X_train_scaled, X_test_scaled, y_train, y_test
+    
+    return df, X_test_scaled
 
 
-def train_model(X_train, y_train) -> RandomForestRegressor:
-    """
-    Train a Random Forest Regressor with the best parameters.
-    Best Parameters: {'max_depth': 20, 'min_samples_split': 2, 'n_estimators': 200}
-    """
-    model = RandomForestRegressor(max_depth=20, min_samples_split=2, n_estimators=200, random_state=42)
-    print("Using Random Forest Regressor with best parameters:")
-    print(model)
-    model.fit(X_train, y_train)
-    return model
-
-
-def evaluate_model(model, X_test, y_test, show_plots: bool = True):
-    """
-    Evaluate the model using MAE, RMSE, and R² score, and optionally plot predictions versus actual values.
-    """
-    y_pred = model.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    rmse = mse ** 0.5
-    r2 = r2_score(y_test, y_pred)
+###############################################################################
+# 2) MAIN SCRIPT
+###############################################################################
+def main():
+    # Filenames (adjust paths if needed)
+    train_file = "train.csv"
+    test_file = "test.csv"
+    submission_file = "sampleSubmission.csv"
     
-    print(f"Mean Absolute Error: {mae}")
-    print(f"Root Mean Squared Error: {rmse}")
-    print(f"R^2 Score: {r2}")
+    # -----------------------------
+    # A) Load and preprocess TRAIN
+    # -----------------------------
+    train_df = pd.read_csv(train_file)
     
-    if show_plots:
-        plt.figure(figsize=(10, 6))
-        plt.scatter(y_test, y_pred, alpha=0.6)
-        plt.plot([0, max(y_test)], [0, max(y_test)], color='red', linestyle='--')
-        plt.xlabel('Valeurs Réelles')
-        plt.ylabel('Prédictions')
-        plt.title('Prédictions vs Valeurs Réelles (Random Forest)')
-        plt.show()
+    # Prepare train data (includes outlier removal, clustering, etc.)
+    X_scaled, y, scaler, kmeans, train_columns = prepare_train_data(train_df, n_clusters=3, show_plots=False)
     
-    return mae, rmse, r2
-
-
-def process_and_predict(file_path: str, n_clusters: int = 3, show_plots: bool = True):
-    """
-    Process the dataset, forecast bike ride demand with a Random Forest Regressor,
-    and evaluate model performance.
+    # -----------------------------
+    # B) Local train/test split for evaluation
+    # -----------------------------
+    X_train, X_val, y_train, y_val = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
     
-    Args:
-        file_path (str): Path to the CSV file.
-        n_clusters (int): Number of clusters for the clustering step.
-        show_plots (bool): Whether to display plots.
+    # We’ll try multiple models
+    model_types = ['random_forest', 'xgboost', 'lightgbm']
+    best_model = None
+    best_model_name = None
+    best_mae = float('inf')
+    best_model_params = None
+    results = []
     
-    Returns:
-        model: The trained Random Forest model.
-        mae (float): Mean Absolute Error on the test set.
-        rmse (float): Root Mean Squared Error on the test set.
-        r2 (float): R² score on the test set.
-    """
-    data = load_and_explore_data(file_path)
-    data = preprocess_data(data)
+    for mtype in model_types:
+        print("=====================================")
+        print(f"Training model: {mtype}")
+        
+        # Create model
+        if mtype == 'random_forest':
+            model = RandomForestRegressor(random_state=42)
+        elif mtype == 'xgboost':
+            model = xgb.XGBRegressor(random_state=42)
+        elif mtype == 'lightgbm':
+            model = lgb.LGBMRegressor(verbosity=-1, random_state=42)
+        else:
+            model = RandomForestRegressor(random_state=42)
+        
+        # Hyperparameter tuning
+        param_grid = {
+            'n_estimators': [100, 200],
+            'max_depth': [10, 20, 30],
+            'min_samples_split': [2, 5, 10],
+        }
+        print("Tuning hyperparameters...")
+        grid_search = GridSearchCV(model, param_grid, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
+        grid_search.fit(X_train, y_train)
+        
+        best_params_ = grid_search.best_params_
+        best_model_ = grid_search.best_estimator_
+        
+        # Evaluate on validation set
+        y_pred_val = best_model_.predict(X_val)
+        mae_val = mean_absolute_error(y_val, y_pred_val)
+        mse_val = mean_squared_error(y_val, y_pred_val)
+        rmse_val = np.sqrt(mse_val)
+        r2_val = r2_score(y_val, y_pred_val)
+        
+        # Adjusted R² (statsmodels approach)
+        X_pred_const = sm.add_constant(y_pred_val)
+        ols_model = sm.OLS(y_val, X_pred_const).fit()
+        adj_r2_val = ols_model.rsquared_adj
+        
+        print(f"MAE = {mae_val:.4f}, RMSE = {rmse_val:.4f}, R² = {r2_val:.4f}, Adjusted R² = {adj_r2_val:.4f}")
+        print(f"Best parameters: {best_params_}")
+        
+        # Keep track
+        results.append({
+            "Model": mtype,
+            "MAE": mae_val,
+            "RMSE": rmse_val,
+            "R²": r2_val,
+            "Adjusted R²": adj_r2_val,
+            "Best Parameters": best_params_
+        })
+        
+        # Update best model
+        if mae_val < best_mae:
+            best_mae = mae_val
+            best_model = best_model_
+            best_model_name = mtype
+            best_model_params = best_params_
+        print()
     
-    if show_plots:
-        sns.histplot(data["count"], bins=30, kde=True)
-        plt.title('Distribution des demandes de vélo')
-        plt.show()
+    # Summarize results
+    results_df = pd.DataFrame(results)
+    print("Résumé des résultats:")
+    print(results_df)
+    print("\n")
+    print(f"Le meilleur modèle est {best_model_name} avec MAE: {best_mae} et Best Parameters: {best_model_params}\n")
     
-    data = detect_and_remove_outliers(data, show_plots=show_plots)
-    data = perform_clustering(data, n_clusters=n_clusters)
-    X, y = prepare_features(data, show_plots=show_plots)
-    X_train, X_test, y_train, y_test = split_and_scale(X, y)
+    # -----------------------------
+    # C) Retrain on the ENTIRE train set with the best model
+    # -----------------------------
+    best_model.fit(X_scaled, y)  # re-fit using all training data
     
-    model = train_model(X_train, y_train)
-    mae, rmse, r2 = evaluate_model(model, X_test, y_test, show_plots=show_plots)
+    # -----------------------------
+    # D) Preprocess TEST data and predict
+    # -----------------------------
+    test_df = pd.read_csv(test_file)
+    # We transform the test data with the same pipeline (except outlier removal)
+    test_df_processed, X_test_scaled = prepare_test_data(test_df, train_columns, scaler, kmeans=kmeans)
     
-    return model, mae, rmse, r2
+    # Predict on test
+    y_test_pred = best_model.predict(X_test_scaled)
+    
+    # -----------------------------
+    # E) Create submission file
+    # -----------------------------
+    # We'll read the sampleSubmission and fill in the "count" column
+    submission_df = pd.read_csv(submission_file)
+    # Match up the rows by the same datetime if needed, or if they're in the same order
+    # Typically, Kaggle expects the same order as test.csv
+    submission_df["count"] = y_test_pred
+    
+    # Save to new CSV
+    submission_df.to_csv("my_submission.csv", index=False)
+    print("Final submission saved to 'my_submission.csv'.")
 
 
 if __name__ == "__main__":
-    file_path = "/content/train.csv" 
-    model, mae, rmse, r2 = process_and_predict(file_path, n_clusters=3, show_plots=True)
+    main()
